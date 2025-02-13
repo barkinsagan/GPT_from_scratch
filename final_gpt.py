@@ -60,7 +60,20 @@ class MultiHeadAttention(nn.Module):
 
 from final_gpt import MultiHeadAttention
 
-from torch.nn import  LayerNorm
+
+
+class LayerNorm(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.eps = 1e-5
+        self.scale = nn.Parameter(torch.ones(emb_dim))
+        self.shift = nn.Parameter(torch.zeros(emb_dim))
+
+    def forward(self, x):
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        norm_x = (x - mean) / torch.sqrt(var + self.eps)
+        return self.scale * norm_x + self.shift
 
 def generate_text_simple(model, idx,                 #1
                          max_new_tokens, context_size): 
@@ -160,9 +173,7 @@ import torch
 with torch.no_grad():
     torch.cuda.empty_cache()
 
-print("Memory stats 1:")
-print(f"Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-print(f"Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
 
 
 
@@ -185,7 +196,75 @@ model.eval()
 
 import tiktoken
 
-from final_gpt import generate_text_simple
+import numpy as np
+
+def assign(left, right):
+    if left.shape != right.shape:
+        raise ValueError(f"Shape mismatch. Left: {left.shape}, "
+                          "Right: {right.shape}"
+        )
+    return torch.nn.Parameter(torch.tensor(right))
+
+
+def load_weights_into_gpt(gpt, params):           #1
+    gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params['wpe'])
+    gpt.tok_emb.weight = assign(gpt.tok_emb.weight, params['wte'])
+
+    for b in range(len(params["blocks"])):     #2
+        q_w, k_w, v_w = np.split(                            #3
+            (params["blocks"][b]["attn"]["c_attn"])["w"], 3, axis=-1)
+        gpt.trf_blocks[b].att.W_query.weight = assign(
+            gpt.trf_blocks[b].att.W_query.weight, q_w.T)
+        gpt.trf_blocks[b].att.W_key.weight = assign(
+            gpt.trf_blocks[b].att.W_key.weight, k_w.T)
+        gpt.trf_blocks[b].att.W_value.weight = assign(
+            gpt.trf_blocks[b].att.W_value.weight, v_w.T)
+
+        q_b, k_b, v_b = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["b"], 3, axis=-1)
+        gpt.trf_blocks[b].att.W_query.bias = assign(
+            gpt.trf_blocks[b].att.W_query.bias, q_b)
+        gpt.trf_blocks[b].att.W_key.bias = assign(
+            gpt.trf_blocks[b].att.W_key.bias, k_b)
+        gpt.trf_blocks[b].att.W_value.bias = assign(
+            gpt.trf_blocks[b].att.W_value.bias, v_b)
+
+        gpt.trf_blocks[b].att.out_proj.weight = assign(
+            gpt.trf_blocks[b].att.out_proj.weight, 
+            params["blocks"][b]["attn"]["c_proj"]["w"].T)
+        gpt.trf_blocks[b].att.out_proj.bias = assign(
+            gpt.trf_blocks[b].att.out_proj.bias, 
+            params["blocks"][b]["attn"]["c_proj"]["b"])
+
+        gpt.trf_blocks[b].ff.layers[0].weight = assign(
+            gpt.trf_blocks[b].ff.layers[0].weight, 
+            params["blocks"][b]["mlp"]["c_fc"]["w"].T)
+        gpt.trf_blocks[b].ff.layers[0].bias = assign(
+            gpt.trf_blocks[b].ff.layers[0].bias, 
+            params["blocks"][b]["mlp"]["c_fc"]["b"])
+        gpt.trf_blocks[b].ff.layers[2].weight = assign(
+            gpt.trf_blocks[b].ff.layers[2].weight, 
+            params["blocks"][b]["mlp"]["c_proj"]["w"].T)
+        gpt.trf_blocks[b].ff.layers[2].bias = assign(
+            gpt.trf_blocks[b].ff.layers[2].bias, 
+            params["blocks"][b]["mlp"]["c_proj"]["b"])
+
+        gpt.trf_blocks[b].norm1.scale = assign(
+            gpt.trf_blocks[b].norm1.scale, 
+            params["blocks"][b]["ln_1"]["g"])
+        gpt.trf_blocks[b].norm1.shift = assign(
+            gpt.trf_blocks[b].norm1.shift, 
+            params["blocks"][b]["ln_1"]["b"])
+        gpt.trf_blocks[b].norm2.scale = assign(
+            gpt.trf_blocks[b].norm2.scale, 
+            params["blocks"][b]["ln_2"]["g"])
+        gpt.trf_blocks[b].norm2.shift = assign(
+            gpt.trf_blocks[b].norm2.shift, 
+            params["blocks"][b]["ln_2"]["b"])
+
+    gpt.final_norm.scale = assign(gpt.final_norm.scale, params["g"])
+    gpt.final_norm.shift = assign(gpt.final_norm.shift, params["b"])
+    gpt.out_head.weight = assign(gpt.out_head.weight, params["wte"])
 
 def text_to_token_ids(text, tokenizer):
     encoded = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
@@ -214,9 +293,7 @@ with open(file_path, "r", encoding="utf-8") as file:
     text_data = file.read()
 
 
-print("Memory stats 2:")
-print(f"Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-print(f"Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
 
 
 import torch
@@ -251,9 +328,7 @@ val_data = text_data[split_idx:]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)   #1
 
-print("Memory stats 3:")
-print(f"Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-print(f"Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
 
 def create_dataloader_v1(txt, batch_size=4, max_length=256,
                          stride=128, shuffle=True, drop_last=True,
@@ -290,9 +365,7 @@ val_loader = create_dataloader_v1(
     shuffle=False,
     num_workers=0
 )
-print("Memory stats 4:")
-print(f"Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-print(f"Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
 
 def calc_loss_batch(input_batch, target_batch, model, device):
     input_batch = input_batch.to(device)         #1
@@ -386,9 +459,7 @@ def train_model_simple(model, train_loader, val_loader,
         )
     return train_losses, val_losses, track_tokens_seen
 
-print("Memory stats 5:")
-print(f"Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-print(f"Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
 
 """
 torch.manual_seed(123)
@@ -407,3 +478,4 @@ train_losses, val_losses, tokens_seen = train_model_simple(
 
 
  """   
+ 

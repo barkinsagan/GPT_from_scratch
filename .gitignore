@@ -5,3 +5,19 @@ gpt2/
 
 =4.66
 
+accuracy-plot.pdf
+
+loss-plot.pdf
+
+train.csv
+
+validation.csv
+
+test.csv
+
+sms_spam_collection/
+
+sms_spam_collection.zip
+
+
+instruction-data.json
